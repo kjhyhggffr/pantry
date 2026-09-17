@@ -1,0 +1,4 @@
+# The listener runs on the standard library alone in stdin mode, which is all
+# you need to try the system out. evdev is only required for --device mode,
+# where the scanner is grabbed exclusively (Linux / Raspberry Pi).
+evdev>=1.7.0 ; sys_platform == "linux"

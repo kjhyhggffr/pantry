@@ -1,0 +1,26 @@
+# secrets
+.env
+.env.local
+*.json.key
+service-account*.json
+
+# listener state
+agent/.scanner_state.json
+agent/.scanner_outbox.jsonl
+
+# node
+node_modules/
+.next/
+out/
+.vercel/
+*.tsbuildinfo
+next-env.d.ts
+
+# python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# os
+.DS_Store
