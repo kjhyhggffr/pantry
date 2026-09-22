@@ -1,0 +1,31 @@
+# systemd unit for the listener. For the Raspberry Pi, when you have one.
+#
+#   sudo cp pantry-scanner.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now pantry-scanner
+#   journalctl -u pantry-scanner -f
+#
+# Reading /dev/input needs group membership rather than root:
+#   sudo usermod -aG input pi
+
+[Unit]
+Description=Pantry barcode scanner listener
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=pi
+WorkingDirectory=/home/pi/pantry-scanner/agent
+ExecStart=/usr/bin/python3 /home/pi/pantry-scanner/agent/scanner_listener.py --device auto
+Restart=always
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+# The service only ever needs its own directory and the network.
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

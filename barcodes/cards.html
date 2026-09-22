@@ -1,0 +1,62 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>Pantry scanner &mdash; control barcodes</title>
+<style>
+  @page { size: A4; margin: 14mm; }
+  * { box-sizing: border-box; }
+  body {
+    font-family: ui-sans-serif, -apple-system, "Segoe UI", Roboto, sans-serif;
+    margin: 0; padding: 24px; color: #16150f; background: #faf9f5;
+  }
+  h1 { font-size: 20px; margin: 0 0 4px; }
+  .lede { margin: 0 0 24px; color: #6b6963; font-size: 13px; max-width: 60ch; }
+  .card {
+    border: 1.5px solid #e3e1d9; border-left: 6px solid var(--accent);
+    border-radius: 10px; background: #fff; padding: 18px 20px 14px;
+    margin-bottom: 16px; break-inside: avoid; page-break-inside: avoid;
+  }
+  .card header { display: flex; align-items: center; gap: 8px; }
+  .dot { width: 10px; height: 10px; border-radius: 50%; background: var(--accent); }
+  h2 { font-size: 15px; letter-spacing: .08em; margin: 0; color: var(--accent); }
+  .card img { display: block; height: 78px; margin: 12px 0 6px; }
+  .card p { margin: 0 0 8px; font-size: 13px; color: #44423c; max-width: 62ch; }
+  .card code { font-size: 11px; color: #8a8880; }
+  @media print { body { background: #fff; padding: 0; } }
+</style>
+</head>
+<body>
+  <h1>Pantry scanner &mdash; control barcodes</h1>
+  <p class="lede">Print at 100% scale, cut along the cards, and tape them where you
+  use the scanner. Scanning one switches the mode; it stays in that mode until you
+  scan the other one.</p>
+    <section class="card" style="--accent: #1f7a3d">
+      <header>
+        <span class="dot"></span>
+        <h2>PANTRY IN</h2>
+      </header>
+      <img src="MODE_PANTRY_IN.svg" alt="PANTRY IN barcode" />
+      <p>Everything scanned after this goes INTO the pantry sheet.</p>
+      <code>!!MODE:IN!!</code>
+    </section>
+    <section class="card" style="--accent: #b3421a">
+      <header>
+        <span class="dot"></span>
+        <h2>CART OUT</h2>
+      </header>
+      <img src="MODE_CART_OUT.svg" alt="CART OUT barcode" />
+      <p>Everything scanned after this leaves the pantry and lands in the Frisco cart queue.</p>
+      <code>!!MODE:OUT!!</code>
+    </section>
+    <section class="card" style="--accent: #4b4b4b">
+      <header>
+        <span class="dot"></span>
+        <h2>UNDO LAST</h2>
+      </header>
+      <img src="MODE_UNDO.svg" alt="UNDO LAST barcode" />
+      <p>Reverses the most recent scan. Does not change the current mode.</p>
+      <code>!!MODE:UNDO!!</code>
+    </section>
+</body>
+</html>
