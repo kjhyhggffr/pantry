@@ -271,6 +271,69 @@ class OutboxReplayTests(ListenerTestCase):
         self.assertEqual(self.rejected(), [])
 
 
+class ReconnectOrderingTests(ListenerTestCase):
+    """Spooled scans must reach the server before anything scanned after them."""
+
+    OLD = [{"code": "OLD1", "mode": "in", "ts": 1}, {"code": "OLD2", "mode": "out", "ts": 2}]
+
+    def test_new_scan_drains_outbox_first_once_server_is_back(self):
+        self.write_outbox(self.OLD)
+        self.scan("NEW", "in")
+        self.assertEqual(
+            [(b["code"], b["mode"]) for b in self.server.bodies()],
+            [("OLD1", "in"), ("OLD2", "out"), ("NEW", "in")],
+        )
+        self.assertFalse(self.mod.OUTBOX_FILE.exists())
+
+    def test_new_scan_queues_behind_outbox_when_drain_cannot_finish(self):
+        self.write_outbox(self.OLD)
+        self.server.script("POST", "/api/scan", (200, {"ok": True}), (503, {"ok": False}))
+        self.assertEqual(self.scan("NEW", "out"), "out")
+        # OLD1 delivered, OLD2 hit a 5xx; NEW must not jump ahead of OLD2.
+        self.assertEqual([b["code"] for b in self.server.bodies()], ["OLD1", "OLD2"])
+        self.assertEqual(
+            [(e["code"], e["mode"]) for e in self.outbox()], [("OLD2", "out"), ("NEW", "out")]
+        )
+
+    def test_new_scan_queues_behind_outbox_when_server_is_down(self):
+        self.write_outbox(self.OLD)
+        self.scan("NEW", "in", url=f"http://127.0.0.1:{unused_port()}")
+        self.assertEqual([e["code"] for e in self.outbox()], ["OLD1", "OLD2", "NEW"])
+
+    def test_mid_session_reconnect_replays_in_scan_order(self):
+        dead = f"http://127.0.0.1:{unused_port()}"
+        self.scan("A", "in", url=dead)
+        self.scan("B", "out", url=dead)
+        self.scan("C", "out")  # server reachable again
+        self.assertEqual(
+            [(b["code"], b["mode"]) for b in self.server.bodies()],
+            [("A", "in"), ("B", "out"), ("C", "out")],
+        )
+        self.assertEqual(self.outbox(), [])
+
+    def test_mode_switch_stays_local_with_pending_outbox(self):
+        self.write_outbox(self.OLD)
+        self.assertEqual(self.scan("!!MODE:OUT!!", "in"), "out")
+        self.assertEqual(self.server.requests, [])
+        self.assertEqual([e["code"] for e in self.outbox()], ["OLD1", "OLD2"])
+
+    def test_undo_drains_outbox_first(self):
+        self.write_outbox(self.OLD)
+        self.scan("!!MODE:UNDO!!", "out")
+        self.assertEqual(
+            [b["code"] for b in self.server.bodies()], ["OLD1", "OLD2", "!!MODE:UNDO!!"]
+        )
+        self.assertFalse(self.mod.OUTBOX_FILE.exists())
+
+    def test_undo_is_refused_while_outbox_cannot_be_drained(self):
+        self.write_outbox(self.OLD)
+        self.server.script("POST", "/api/scan", (503, {"ok": False}))
+        self.assertEqual(self.scan("!!MODE:UNDO!!", "in"), "in")
+        # The undo would otherwise act on whatever was logged before OLD1.
+        self.assertEqual([b["code"] for b in self.server.bodies()], ["OLD1"])
+        self.assertEqual([e["code"] for e in self.outbox()], ["OLD1", "OLD2"])
+
+
 class EndToEndProcessTests(unittest.TestCase):
     """Run the real script (a copy in a temp dir) as a subprocess via stdin mode."""
 

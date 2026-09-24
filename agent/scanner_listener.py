@@ -157,15 +157,18 @@ def reject(line: str) -> None:
         handle.write(line + "\n")
 
 
-def drain_outbox(url: str, token: str) -> None:
-    """Replay anything that was spooled while the server was unreachable."""
+def drain_outbox(url: str, token: str) -> bool:
+    """Replay anything that was spooled while the server was unreachable.
+
+    Returns True once the outbox is empty, False if scans are still waiting.
+    """
     if not OUTBOX_FILE.exists():
-        return
+        return True
 
     lines = [line for line in OUTBOX_FILE.read_text(encoding="utf-8").splitlines() if line]
     if not lines:
         OUTBOX_FILE.unlink(missing_ok=True)
-        return
+        return True
 
     print(f"  .. replaying {len(lines)} spooled scan(s)")
     remaining: list[str] = []
@@ -195,9 +198,11 @@ def drain_outbox(url: str, token: str) -> None:
     if remaining:
         OUTBOX_FILE.write_text("\n".join(remaining) + "\n", encoding="utf-8")
         print(f"  .. {len(remaining)} scan(s) still spooled")
-    else:
-        OUTBOX_FILE.unlink(missing_ok=True)
-        print("  .. outbox empty")
+        return False
+
+    OUTBOX_FILE.unlink(missing_ok=True)
+    print("  .. outbox empty")
+    return True
 
 
 # ---------------------------------------------------------------- handling
@@ -234,7 +239,20 @@ def handle_code(code: str, mode: str, url: str, token: str) -> str:
         print(MODE_BANNERS[action])
         return action
 
+    # Anything that goes to the server must arrive after the scans spooled
+    # before it, so a reconnect mid-session replays the outbox first.
+    caught_up = drain_outbox(url, token)
+
     if action == "undo":
+        if not caught_up:
+            # Undo is not spooled, and sending it now would undo whatever the
+            # server saw last -- not the scan you just made.
+            print(
+                "  ! undo refused: earlier scans are still spooled and the server "
+                "is unreachable. Try again once they have gone through.",
+                file=sys.stderr,
+            )
+            return mode
         try:
             print("  " + describe(post_scan(url, token, "!!MODE:UNDO!!", mode)))
         except Exception as exc:
@@ -242,6 +260,11 @@ def handle_code(code: str, mode: str, url: str, token: str) -> str:
         return mode
 
     # An ordinary product barcode.
+    if not caught_up:
+        spool(code, mode)
+        print(f"  ~ still offline, spooled {code} behind the earlier scans", file=sys.stderr)
+        return mode
+
     try:
         result = post_scan(url, token, code, mode)
         if result.get("ok"):
@@ -409,7 +432,7 @@ def main() -> None:
         return
 
     url, token = config()
-    drain_outbox(url, token)
+    drain_outbox(url, token)  # and again before each scan, see handle_code
 
     try:
         if args.device:
