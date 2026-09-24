@@ -57,11 +57,6 @@ MODE_BANNERS = {
     "out": "\n  >>> CART OUT -- scans now leave the pantry and go to the Frisco queue\n",
 }
 
-# A scanner types a whole barcode in a few milliseconds. Anything slower than
-# this between the last two characters was a human at a keyboard, which is
-# worth knowing about but not worth rejecting.
-HUMAN_TYPING_THRESHOLD_S = 0.5
-
 
 # ---------------------------------------------------------------- config
 
@@ -282,6 +277,11 @@ def handle_code(code: str, mode: str, url: str, token: str) -> str:
     except (urllib.error.URLError, TimeoutError, OSError) as exc:
         spool(code, mode)
         print(f"  ~ offline, spooled {code} ({exc})", file=sys.stderr)
+    except ValueError:
+        # A 2xx that isn't JSON came from something in the way (a captive
+        # portal, a proxy page), not from the pantry server. Try again later.
+        spool(code, mode)
+        print(f"  ~ unexpected non-JSON reply, spooled {code}", file=sys.stderr)
     except Exception as exc:
         print(f"  ! {code} failed: {exc}", file=sys.stderr)
 
@@ -296,13 +296,7 @@ def read_from_stdin(url: str, token: str) -> None:
     print(f"Reading from stdin. Current mode: {mode.upper()}.")
     print("Scan a control card to switch modes, or Ctrl-C to stop.\n")
 
-    last_char_at = 0.0
     for line in sys.stdin:
-        now = time.monotonic()
-        if last_char_at and (now - last_char_at) > HUMAN_TYPING_THRESHOLD_S:
-            pass  # typed by hand rather than scanned; accepted either way
-        last_char_at = now
-
         mode = handle_code(line, mode, url, token)
 
 

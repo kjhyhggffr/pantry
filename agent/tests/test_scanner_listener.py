@@ -170,6 +170,18 @@ class ProductScanTests(ListenerTestCase):
         self.assertEqual(len(self.server.requests), 2)
         self.assertEqual(self.outbox(), [])
 
+    def test_non_json_2xx_is_treated_as_transient_and_spooled(self):
+        # A captive portal or proxy answering 200 with HTML never reached us.
+        self.server.script("POST", "/api/scan", (200, b"<html>Log in to wifi</html>"))
+        self.assertEqual(self.scan("333", "out"), "out")
+        self.assertEqual([(e["code"], e["mode"]) for e in self.outbox()], [("333", "out")])
+
+    def test_non_json_2xx_during_replay_keeps_the_entry(self):
+        self.write_outbox([{"code": "A", "mode": "in"}, {"code": "B", "mode": "in"}])
+        self.server.script("POST", "/api/scan", (200, b"<html>portal</html>"))
+        self.mod.drain_outbox(self.server.url, TOKEN)
+        self.assertEqual([e["code"] for e in self.outbox()], ["A", "B"])
+
     def test_ok_false_response_is_not_spooled(self):
         self.server.script("POST", "/api/scan", (200, {"ok": False, "error": "nope"}))
         self.scan("222", "in")
