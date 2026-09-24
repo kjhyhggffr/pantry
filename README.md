@@ -122,7 +122,14 @@ systemd when you get the Pi.
 
 The listener spools scans to `.scanner_outbox.jsonl` if the server is
 unreachable and replays them on the next start, so scanning in a kitchen with
-patchy wifi does not lose anything.
+patchy wifi does not lose anything. It also tries the outbox again before every
+scan, so when the wifi comes back mid-session the spooled scans go through
+first and in order; until then new scans queue up behind them. Undo is the
+exception: it is never spooled, and while older scans are stuck it is refused
+rather than undoing the wrong thing. A spooled line that can't be read (a
+half-written file after a power cut, say) is moved to
+`.scanner_outbox.rejected.jsonl` for you to look at, instead of blocking
+everything behind it.
 
 ### 5. The Frisco worker
 
@@ -148,7 +155,15 @@ occasionally puts the wrong brand of passata in your cart. Items it cannot
 match are left pending with a note rather than guessed at, and show up on the
 dashboard for you to sort out. Items that are still called `Unknown item …`
 are skipped entirely — searching Frisco for "unknown item" would match
-*something*, and that something would end up in your cart.
+*something*, and that something would end up in your cart. If the search
+itself fails (session expired, `frisco` not installed), the item stays pending
+with the error as its note and is retried on the next pass.
+
+Every cart add is written to `agent/.frisco_added.jsonl` before the worker
+tells the server, and crossed off once the server has heard. If the server
+can't be reached at that moment, the pass stops and the next one reports the
+item done instead of adding it again — so a flaky connection never buys the
+same thing twice. `--dry-run` leaves that file alone.
 
 ---
 
