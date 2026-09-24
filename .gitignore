@@ -18,6 +18,8 @@ next-env.d.ts
 agent/.scanner_state.json
 agent/.scanner_outbox.jsonl
 agent/.scanner_outbox.rejected.jsonl
+agent/.frisco_added.jsonl
+agent/.frisco_added.jsonl.tmp
 
 # Python
 __pycache__/

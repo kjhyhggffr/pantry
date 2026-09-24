@@ -63,6 +63,9 @@ class FakeFrisco:
 class WorkerTestCase(unittest.TestCase):
     def setUp(self):
         self.mod = load_script("frisco_worker.py")
+        self.tmp = Path(tempfile.mkdtemp(prefix="pantry-worker-"))
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+        self.mod.JOURNAL_FILE = self.tmp / ".frisco_added.jsonl"
         self.fake = FakeFrisco()
         patcher = mock.patch.object(self.mod.subprocess, "run", self.fake)
         # mod.subprocess is the real subprocess module; patch only while testing.
@@ -156,7 +159,7 @@ class FindProductTests(WorkerTestCase):
         self.assertFalse(self.mod.is_unnamed("Known item"))
 
 
-class RunOnceTests(WorkerTestCase):
+class QueueTestCase(WorkerTestCase):
     def setUp(self):
         super().setUp()
         self.server = MockServer(default=(200, {"ok": True}))
@@ -176,6 +179,8 @@ class RunOnceTests(WorkerTestCase):
     def item(id_, name, qty=1, barcode="590"):
         return {"id": id_, "ts": "2026-09-24T10:00:00Z", "barcode": barcode, "name": name, "qty": qty}
 
+
+class RunOnceTests(QueueTestCase):
     def test_fetch_queue_is_authenticated_get(self):
         self.queue(self.item(1, "Milk"))
         self.assertEqual(self.mod.fetch_queue(self.server.url, TOKEN)[0]["id"], 1)
@@ -292,6 +297,115 @@ class RunOnceTests(WorkerTestCase):
         self.assertEqual(self.reports(), [])
         self.assertEqual(self.fake.searches(), ["Milk", "Nothing matches"])
         self.assertIn("Milk 1l (id 77)", self.out.getvalue())
+
+
+class JournalTests(QueueTestCase):
+    """A cart add that succeeded must never be repeated, even if reporting it fails."""
+
+    def journal(self) -> list[dict]:
+        path = self.mod.JOURNAL_FILE
+        if not path.exists():
+            return []
+        return [json.loads(line) for line in path.read_text("utf-8").splitlines() if line]
+
+    def write_journal(self, *entries):
+        self.mod.JOURNAL_FILE.write_text(
+            "".join(json.dumps(e) + "\n" for e in entries), encoding="utf-8"
+        )
+
+    ENTRY = {"id": 7, "frisco_product_id": "123", "frisco_product_name": "Mleko", "qty": 3, "ts": 1.0}
+
+    def test_success_leaves_no_journal_behind(self):
+        self.queue(self.item(7, "Milk", qty=3))
+        self.search_returns("Milk", [{"productId": 123, "name": "Mleko"}])
+        self.assertEqual(self.run_once(), 1)
+        self.assertFalse(self.mod.JOURNAL_FILE.exists())
+
+    def test_report_failure_after_add_is_journaled_and_stops_the_pass(self):
+        self.queue(self.item(7, "Milk", qty=3), self.item(8, "Bread"))
+        self.search_returns("Milk", [{"productId": 123, "name": "Mleko"}])
+        self.search_returns("Bread", [{"productId": 456, "name": "Chleb"}])
+        self.server.script("POST", "/api/queue", (503, {"ok": False}))
+        with self.assertRaises(Exception):
+            self.run_once()
+        self.assertEqual(self.fake.cart_adds(), [("123", "3")])  # Bread never attempted
+        [entry] = self.journal()
+        self.assertEqual(
+            {k: entry[k] for k in ("id", "frisco_product_id", "qty")},
+            {"id": 7, "frisco_product_id": "123", "qty": 3},
+        )
+        self.assertIsInstance(entry["ts"], (int, float))
+
+    def test_next_pass_resends_done_and_never_adds_again(self):
+        # Pass 1: added, report lost.
+        self.queue(self.item(7, "Milk", qty=3))
+        self.search_returns("Milk", [{"productId": 123, "name": "Mleko"}])
+        self.server.script("POST", "/api/queue", (503, {"ok": False}))
+        with self.assertRaises(Exception):
+            self.run_once()
+        # Pass 2: server healthy; even if it still lists item 7, it is not re-added.
+        self.queue(self.item(7, "Milk", qty=3), self.item(8, "Bread"))
+        self.search_returns("Bread", [{"productId": 456, "name": "Chleb"}])
+        self.assertEqual(self.run_once(), 1)
+        self.assertEqual(self.fake.cart_adds(), [("123", "3"), ("456", "1")])
+        self.assertEqual(
+            self.reports()[1:],
+            [
+                {"id": 7, "status": "done", "friscoProductId": "123", "friscoProductName": "Mleko"},
+                {"id": 8, "status": "done", "friscoProductId": "456", "friscoProductName": "Chleb"},
+            ],
+        )
+        self.assertEqual(self.journal(), [])
+
+    def test_resend_happens_before_the_queue_is_fetched(self):
+        self.write_journal(self.ENTRY)
+        self.queue()
+        self.run_once()
+        self.assertEqual(
+            [(r["method"], r["path"]) for r in self.server.requests],
+            [("POST", "/api/queue"), ("GET", "/api/queue")],
+        )
+
+    def test_resend_failure_stops_the_pass_and_keeps_the_journal(self):
+        self.write_journal(self.ENTRY)
+        self.queue(self.item(7, "Milk", qty=3))
+        self.server.script("POST", "/api/queue", (503, {"ok": False}))
+        with self.assertRaises(Exception):
+            self.run_once()
+        self.assertEqual(self.fake.calls, [])
+        self.assertEqual([e["id"] for e in self.journal()], [7])
+
+    def test_resend_for_item_gone_from_server_is_forgotten(self):
+        self.write_journal(self.ENTRY, {**self.ENTRY, "id": 9})
+        self.server.script("POST", "/api/queue", (404, {"ok": False, "error": "No such item"}))
+        self.queue()
+        self.run_once()
+        self.assertEqual([r["id"] for r in self.reports()], [7, 9])
+        self.assertEqual(self.journal(), [])
+
+    def test_dry_run_neither_writes_nor_resends_the_journal_and_skips_journaled(self):
+        self.write_journal(self.ENTRY)
+        self.queue(self.item(7, "Milk", qty=3), self.item(8, "Bread"))
+        self.search_returns("Bread", [{"productId": 456, "name": "Chleb"}])
+        self.run_once(dry_run=True)
+        self.assertEqual(self.reports(), [])
+        self.assertEqual(self.fake.searches(), ["Bread"])
+        self.assertEqual(self.journal(), [self.ENTRY])
+
+    def test_dry_run_does_not_create_a_journal(self):
+        self.queue(self.item(8, "Bread"))
+        self.search_returns("Bread", [{"productId": 456, "name": "Chleb"}])
+        self.run_once(dry_run=True)
+        self.assertFalse(self.mod.JOURNAL_FILE.exists())
+
+    def test_unreadable_journal_refuses_to_run_rather_than_risk_a_double_add(self):
+        self.mod.JOURNAL_FILE.write_text('{"id": 7, "frisco_prod\n', encoding="utf-8")
+        self.queue(self.item(7, "Milk"))
+        self.search_returns("Milk", [{"productId": 123, "name": "Mleko"}])
+        with self.assertRaisesRegex(RuntimeError, ".frisco_added.jsonl"):
+            self.run_once()
+        self.assertEqual(self.fake.calls, [])
+        self.assertEqual(self.server.requests, [])
 
 
 class MainTests(WorkerTestCase):

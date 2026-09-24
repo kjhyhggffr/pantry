@@ -33,10 +33,15 @@ import shutil
 import subprocess
 import sys
 import time
+import urllib.error
 import urllib.request
 from pathlib import Path
 
 HERE = Path(__file__).parent
+
+# Items already in the Frisco cart whose "done" has not reached the server yet.
+# Without it, a report lost to a network blip means the next pass buys it again.
+JOURNAL_FILE = HERE / ".frisco_added.jsonl"
 
 # Frisco search is a plain text match, so strip the things that only ever hurt:
 # pack sizes, units, and punctuation that came from the Open Food Facts title.
@@ -88,6 +93,81 @@ def fetch_queue(url: str, token: str) -> list[dict]:
 
 def report(url: str, token: str, item_id: int, status: str, **extra) -> None:
     api(url, token, "/api/queue", {"id": item_id, "status": status, **extra})
+
+
+# ---------------------------------------------------------------- journal
+
+
+def read_journal() -> list[dict]:
+    if not JOURNAL_FILE.exists():
+        return []
+
+    entries = []
+    for line in JOURNAL_FILE.read_text(encoding="utf-8").splitlines():
+        if not line.strip():
+            continue
+        try:
+            entry = json.loads(line)
+        except json.JSONDecodeError:
+            entry = None
+        if not isinstance(entry, dict) or "id" not in entry:
+            # Some item is in the cart and we can no longer tell which. Adding
+            # anything now could buy it twice, so stop and ask a human.
+            raise RuntimeError(
+                f"{JOURNAL_FILE} has an unreadable line: {line!r}. Check the Frisco "
+                "cart, mark that item done on the dashboard, then remove the line."
+            )
+        entries.append(entry)
+    return entries
+
+
+def journal_add(item_id: int, product_id: str, product_name: str, qty: int) -> None:
+    entry = {
+        "id": item_id,
+        "frisco_product_id": product_id,
+        "frisco_product_name": product_name,
+        "qty": qty,
+        "ts": time.time(),
+    }
+    with JOURNAL_FILE.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(entry) + "\n")
+        handle.flush()
+        os.fsync(handle.fileno())
+
+
+def journal_remove(item_id: int) -> None:
+    keep = [entry for entry in read_journal() if entry["id"] != item_id]
+    if not keep:
+        JOURNAL_FILE.unlink(missing_ok=True)
+        return
+    scratch = JOURNAL_FILE.with_name(JOURNAL_FILE.name + ".tmp")
+    scratch.write_text("".join(json.dumps(entry) + "\n" for entry in keep), encoding="utf-8")
+    os.replace(scratch, JOURNAL_FILE)
+
+
+def resend_journal(url: str, token: str, entries: list[dict]) -> None:
+    """Tell the server about cart adds whose "done" got lost last time.
+
+    Any failure other than "no such item" propagates and ends the pass: the
+    server is unreachable, and the journal keeps these safe until it is back.
+    """
+    for entry in entries:
+        try:
+            report(
+                url,
+                token,
+                entry["id"],
+                "done",
+                friscoProductId=entry.get("frisco_product_id"),
+                friscoProductName=entry.get("frisco_product_name"),
+            )
+            print(f"  + item {entry['id']}: added on an earlier pass, now reported done")
+        except urllib.error.HTTPError as exc:
+            exc.close()
+            if exc.code != 404:
+                raise
+            print(f"  ? item {entry['id']}: no longer on the server; it is in the cart already")
+        journal_remove(entry["id"])
 
 
 # ---------------------------------------------------------------- frisco
@@ -172,6 +252,11 @@ def add_to_cart(product_id: str, quantity: int) -> None:
 
 
 def run_once(url: str, token: str, dry_run: bool) -> int:
+    journaled = read_journal()
+    already_added = {entry["id"] for entry in journaled}
+    if journaled and not dry_run:
+        resend_journal(url, token, journaled)
+
     items = fetch_queue(url, token)
 
     if not items:
@@ -183,6 +268,10 @@ def run_once(url: str, token: str, dry_run: bool) -> int:
 
     for item in items:
         label = f"{item['name']} x{item['qty']}"
+
+        if item["id"] in already_added:
+            print(f"  = {label}: already in the cart, waiting to be reported -- not adding again")
+            continue
 
         if is_unnamed(item["name"]):
             print(f"  ? {label}: still unnamed -- name it on the dashboard first")
@@ -222,15 +311,27 @@ def run_once(url: str, token: str, dry_run: bool) -> int:
             report(url, token, item["id"], "failed", note=str(exc)[:200])
             continue
 
+        # It is in the cart now. Write that down before telling the server, so
+        # a report that never arrives cannot lead to adding it a second time.
+        try:
+            journal_add(item["id"], match["id"], match["name"], item["qty"])
+        except OSError as exc:
+            print(f"  ! could not write {JOURNAL_FILE.name}: {exc}", file=sys.stderr)
+
         print(f"  + {label}  ->  {match['name']}")
-        report(
-            url,
-            token,
-            item["id"],
-            "done",
-            friscoProductId=match["id"],
-            friscoProductName=match["name"],
-        )
+        try:
+            report(
+                url,
+                token,
+                item["id"],
+                "done",
+                friscoProductId=match["id"],
+                friscoProductName=match["name"],
+            )
+        except Exception:
+            print(f"  ! {label}: in the cart, but the server did not hear about it; will retry")
+            raise
+        journal_remove(item["id"])
         handled += 1
 
     return handled
@@ -261,7 +362,10 @@ def main() -> None:
     url, token = config()
 
     if not args.watch:
-        run_once(url, token, args.dry_run)
+        try:
+            run_once(url, token, args.dry_run)
+        except Exception as exc:
+            sys.exit(f"  ! pass failed: {exc}")
         return
 
     print(f"Watching the queue every {args.watch}s. Ctrl-C to stop.\n")
