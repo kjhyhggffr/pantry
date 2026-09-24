@@ -2,23 +2,29 @@
   "name": "pantry-scanner-web",
   "version": "1.0.0",
   "private": true,
-  "description": "Vercel side of the pantry scanner: scan ingest, Google Sheets store, Frisco cart queue.",
+  "description": "Vercel side of the pantry scanner: scan ingest, Supabase store, Frisco cart queue.",
   "scripts": {
     "dev": "next dev",
-    "build": "next build",
+    "build": "node scripts/setup-db.mjs && next build",
     "start": "next start",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "test": "node --import tsx --test \"test/**/*.test.ts\""
   },
   "dependencies": {
-    "google-auth-library": "^9.15.0",
+    "@supabase/ssr": "^0.12.7",
+    "@supabase/supabase-js": "^2.117.1",
     "next": "^15.1.6",
+    "postgres": "^3.4.9",
     "react": "^19.0.0",
-    "react-dom": "^19.0.0"
+    "react-dom": "^19.0.0",
+    "server-only": "^0.0.1"
   },
   "devDependencies": {
     "@types/node": "^22.10.0",
     "@types/react": "^19.0.0",
     "@types/react-dom": "^19.0.0",
+    "tsx": "^4.23.15",
     "typescript": "^5.7.0"
-  }
+  },
+  "packageManager": "pnpm@10.34.5+sha512.a4ee05f2f73658255bd6a89859c065a45c28a57daefae2c893a168ee2b73168c37b91e83e57ea67654ad03f03031746430e8bce38e362e042605fb8abc80192e"
 }

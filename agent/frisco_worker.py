@@ -86,8 +86,8 @@ def fetch_queue(url: str, token: str) -> list[dict]:
     return result.get("items", [])
 
 
-def report(url: str, token: str, row: int, status: str, **extra) -> None:
-    api(url, token, "/api/queue", {"row": row, "status": status, **extra})
+def report(url: str, token: str, item_id: int, status: str, **extra) -> None:
+    api(url, token, "/api/queue", {"id": item_id, "status": status, **extra})
 
 
 # ---------------------------------------------------------------- frisco
@@ -199,7 +199,7 @@ def run_once(url: str, token: str, dry_run: bool) -> int:
                 report(
                     url,
                     token,
-                    item["row"],
+                    item["id"],
                     "pending",
                     note=f"no match for '{search_term(item['name'])}'",
                 )
@@ -213,14 +213,14 @@ def run_once(url: str, token: str, dry_run: bool) -> int:
             add_to_cart(match["id"], item["qty"])
         except Exception as exc:
             print(f"  ! {label}: add failed -- {exc}")
-            report(url, token, item["row"], "failed", note=str(exc)[:200])
+            report(url, token, item["id"], "failed", note=str(exc)[:200])
             continue
 
         print(f"  + {label}  ->  {match['name']}")
         report(
             url,
             token,
-            item["row"],
+            item["id"],
             "done",
             friscoProductId=match["id"],
             friscoProductName=match["name"],

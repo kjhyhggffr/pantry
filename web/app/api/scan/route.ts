@@ -19,10 +19,11 @@ import { UnauthorizedError, requireToken } from '@/lib/auth';
 import { controlActionFor, normaliseBarcode } from '@/lib/codes';
 import type { Mode } from '@/lib/codes';
 import { recordScan, undoLastScan } from '@/lib/pantry';
+import { getStore } from '@/lib/supabase-store';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
-// Sheets round-trips add up; the default 10s is occasionally not enough.
+// Open Food Facts plus a handful of database round-trips; leave headroom.
 export const maxDuration = 30;
 
 export async function POST(request: Request) {
@@ -40,7 +41,7 @@ export async function POST(request: Request) {
     const control = controlActionFor(code);
 
     if (control === 'undo') {
-      return NextResponse.json(await undoLastScan());
+      return NextResponse.json(await undoLastScan(getStore()));
     }
 
     if (control === 'in' || control === 'out') {
@@ -52,7 +53,7 @@ export async function POST(request: Request) {
     const mode: Mode = body.mode === 'out' ? 'out' : 'in';
     const source = typeof body.source === 'string' ? body.source : 'scanner';
 
-    const result = await recordScan(code, mode, source);
+    const result = await recordScan(getStore(), code, mode, source);
     return NextResponse.json(result);
   } catch (error) {
     if (error instanceof UnauthorizedError) {

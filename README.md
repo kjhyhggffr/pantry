@@ -3,16 +3,16 @@
 Two printed barcodes turn a cheap keyboard-wedge scanner into a pantry system.
 
 Scan **PANTRY IN**, then scan groceries as you put them away — each one is
-looked up, named, and counted into a Google Sheet. Scan **CART OUT**, then scan
+looked up, named, and counted into a Supabase database. Scan **CART OUT**, then scan
 the empty packet as you throw it away — it comes off the pantry count and lands
 in a shopping queue that gets pushed into your [Frisco](https://www.frisco.pl)
 cart.
 
 ```
-  scanner ──► listener ──► Vercel ──► Google Sheet
+  scanner ──► listener ──► Vercel ──► Supabase Postgres
   (types)     (laptop      (Next.js)   ├── pantry     what you have
               or Pi)                   ├── cart_queue what to buy
-                                       ├── log        every scan, undoable
+                                       ├── scan_log   every scan, undoable
                                        └── products   barcode → name cache
                                             │
                           frisco_worker.py ─┘──► frisco CLI ──► your cart
@@ -22,7 +22,8 @@ cart.
 
 | Path | What it is |
 | --- | --- |
-| `web/` | The Vercel app: scan ingest, the Sheets store, the dashboard. Set this as the project's root directory. |
+| `web/` | The Vercel app: scan ingest, the Supabase store, the dashboard. Set this as the project's root directory. |
+| `web/supabase/migrations/` | The database schema, applied automatically at build time by `web/scripts/setup-db.mjs`. |
 | `agent/scanner_listener.py` | Reads the scanner, holds the current mode, posts scans. |
 | `agent/frisco_worker.py` | Drains the cart queue into Frisco. Runs on your machine, not on Vercel. |
 | `barcodes/` | The printable control barcodes, plus the script that made them. |
@@ -48,48 +49,43 @@ does not need to support programming modes or prefixes; it just types.
 
 ## Setup
 
-### 1. The spreadsheet
-
-Create a blank Google Sheet. Its ID is the long string in the URL between
-`/d/` and `/edit`. The four tabs are created automatically on first use — you
-do not need to set anything up inside it.
-
-### 2. A service account
-
-The server writes to the sheet as a robot, so there is no OAuth dance and no
-token to refresh.
-
-1. In the [Google Cloud console](https://console.cloud.google.com), create a
-   project (or reuse one).
-2. **APIs & Services → Library** → enable **Google Sheets API**.
-3. **APIs & Services → Credentials → Create credentials → Service account**.
-   Name it anything; no roles needed.
-4. Open the service account → **Keys → Add key → Create new key → JSON**.
-5. Back in your spreadsheet, hit **Share** and add the service account's email
-   address (it ends in `.iam.gserviceaccount.com`) as an **Editor**.
-
-This last step is the one people forget. Without it every request comes back
-403 and the dashboard says it cannot read the spreadsheet.
-
-### 3. Deploy to Vercel
+### 1. Deploy to Vercel
 
 Push this repo to GitHub, then import it at
 [vercel.com/new](https://vercel.com/new).
 
 - **Root Directory**: `web`
-- Framework preset: Next.js (detected automatically)
+- Framework preset: Next.js (detected automatically); pnpm is picked up from
+  `packageManager` in `web/package.json`.
 
-Add four environment variables (see `.env.example`):
+### 2. Supabase
+
+In the Vercel project, **Storage → Create / Connect → Supabase**, and connect it
+to all environments. The integration adds the `SUPABASE_*`, `NEXT_PUBLIC_SUPABASE_*`
+and `POSTGRES_*` variables itself.
+
+Then in the Supabase dashboard:
+
+1. **Authentication → Sign In / Providers → Email**: keep email enabled and
+   turn **off** "Allow new users to sign up".
+2. **Authentication → URL Configuration**: set **Site URL** to your production
+   URL and add `https://<your-project>.vercel.app/auth/callback` to
+   **Redirect URLs**.
+
+### 3. Environment variables
+
+Add these two yourself (see `web/.env.example`):
 
 | Name | Value |
 | --- | --- |
-| `GOOGLE_SHEET_ID` | from the sheet URL |
-| `GOOGLE_SERVICE_ACCOUNT_EMAIL` | `client_email` in the JSON key |
-| `GOOGLE_PRIVATE_KEY` | `private_key` in the JSON key, pasted whole |
-| `SCANNER_TOKEN` | `openssl rand -hex 32` |
+| `SCANNER_TOKEN` | `openssl rand -hex 32` — shared with the listener |
+| `ALLOWED_EMAILS` | the address(es) allowed into the dashboard, comma-separated |
 
-Redeploy after adding them. Open the deployment URL: you should get an empty
-dashboard rather than an error.
+Redeploy after adding them. Every build runs `scripts/setup-db.mjs` first,
+which applies any new migration and creates a confirmed Supabase Auth account
+for each address in `ALLOWED_EMAILS`, so the magic link has someone to go to.
+Open the deployment URL, ask for a link, and you should land on an empty
+dashboard.
 
 ### 4. The listener
 
@@ -97,8 +93,8 @@ On whatever machine the scanner is plugged into — your laptop is fine to start
 with, a Raspberry Pi later.
 
 ```bash
-git clone https://github.com/YOURNAME/pantry-scanner.git
-cd pantry-scanner/agent
+git clone https://github.com/kjhyhggffr/pantry.git
+cd pantry/agent
 
 cat > .env <<'EOF'
 PANTRY_SERVER_URL=https://your-project.vercel.app
@@ -139,7 +135,7 @@ So the queue lives on Vercel and this drains it locally.
 go install github.com/rrudol/frisco/cmd/frisco@latest
 frisco session login
 
-cd pantry-scanner/agent
+cd pantry/agent
 python3 frisco_worker.py --dry-run    # show the matches, change nothing
 python3 frisco_worker.py              # actually add them
 python3 frisco_worker.py --watch 300  # or leave it running
@@ -175,24 +171,37 @@ never seen get a **Needs a name** row — name it once and it is remembered.
 
 [Open Food Facts](https://world.openfoodfacts.org) — free, no API key, good
 Polish and European grocery coverage. Every result is cached in the `products`
-tab, so a barcode is only ever fetched once and the system gets faster as your
+table, so a barcode is only ever fetched once and the system gets faster as your
 pantry stabilises. A lookup that fails never loses the scan; you just get
 `Unknown item 5900…` until you name it.
 
 ## Notes and caveats
 
-- **The sheet is the database.** No Postgres, no KV, nothing else to pay for,
-  and you can fix anything by hand from your phone. The trade is that each scan
-  is a few API round-trips — expect roughly a second per scan, which is fine
-  for a pantry and would not be for a shop till.
-- **One shared secret** guards every write endpoint. The dashboard uses server
-  actions, so the browser never sees the token. Anyone with your Vercel URL can
-  still see the dashboard, though — if that matters, turn on Vercel
-  Authentication in the project's Deployment Protection settings.
+- **Supabase is the database.** The server talks to it with the service-role
+  key only; row-level security is on with no policies, so the public anon key
+  that the login page uses can read nothing.
+- **Two kinds of auth.** The dashboard needs a Supabase magic-link login from
+  an address on `ALLOWED_EMAILS` (enforced in `middleware.ts` and again in every
+  server action). The machine endpoints `/api/scan` and `/api/queue` skip that
+  and take `Authorization: Bearer $SCANNER_TOKEN` instead, because the scanner
+  has no browser. Vercel Authentication is off for production, so the listener
+  can reach the API directly.
 - **Quantities are counts, not weights.** Half a bag of flour reads as one bag
   until you scan it out.
 - **The Frisco matching is the weak link**, as above. Everything else in the
   chain is exact; that one step is a guess.
+
+## Development
+
+```bash
+cd web
+pnpm install
+pnpm test        # node:test via tsx, in-memory store, no network
+pnpm typecheck
+
+cd ..
+uv run --no-project python -m unittest discover -s agent/tests -t .
+```
 
 ## Licence
 

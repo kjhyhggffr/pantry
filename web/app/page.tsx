@@ -1,14 +1,15 @@
 /**
  * The dashboard: what is in the pantry, what is queued for Frisco, what still
  * needs a name, and a manual entry box for the days the scanner is out of
- * reach. Server-rendered straight off the spreadsheet on every load.
+ * reach. Server-rendered straight off the database on every load.
  */
 
 import Link from 'next/link';
 
-import { TABS, getRecords } from '@/lib/sheets';
-import { parseQty } from '@/lib/pantry';
-import type { CartQueueRecord, LogRecord, PantryRecord } from '@/lib/pantry';
+import { UNKNOWN_PREFIX } from '@/lib/openfoodfacts';
+import { requireUser } from '@/lib/supabase-auth';
+import { getStore } from '@/lib/supabase-store';
+import type { CartItem, LogEntry, PantryItem } from '@/lib/store';
 import {
   manualScanAction,
   renameProductAction,
@@ -20,31 +21,28 @@ export const dynamic = 'force-dynamic';
 export const revalidate = 0;
 
 export default async function DashboardPage() {
-  let pantry: Array<PantryRecord & { _row: number }> = [];
-  let queue: Array<CartQueueRecord & { _row: number }> = [];
-  let log: Array<LogRecord & { _row: number }> = [];
+  const user = await requireUser();
+
+  let pantry: PantryItem[] = [];
+  let pending: CartItem[] = [];
+  let recent: LogEntry[] = [];
   let loadError: string | null = null;
 
   try {
-    [pantry, queue, log] = await Promise.all([
-      getRecords<PantryRecord>(TABS.pantry),
-      getRecords<CartQueueRecord>(TABS.cartQueue),
-      getRecords<LogRecord>(TABS.log),
+    const store = getStore();
+    [pantry, pending, recent] = await Promise.all([
+      store.listPantry(),
+      store.listPendingCart(),
+      store.recentLog(12),
     ]);
   } catch (error) {
-    loadError = error instanceof Error ? error.message : 'Could not reach the spreadsheet';
+    loadError = error instanceof Error ? error.message : 'Could not reach the database';
   }
 
-  const inStock = pantry
-    .filter((item) => parseQty(item.qty) > 0)
-    .sort((a, b) => b.last_seen.localeCompare(a.last_seen));
+  const inStock = pantry.filter((item) => item.qty > 0);
+  const unnamed = pantry.filter((item) => item.name.startsWith(UNKNOWN_PREFIX));
 
-  const pending = queue.filter((item) => item.status === 'pending' && parseQty(item.qty) > 0);
-
-  const unnamed = pantry.filter((item) => item.name.startsWith('Unknown item '));
-
-  const recent = log.slice(-12).reverse();
-  const lastScan = recent.find((entry) => !entry.undone);
+  const lastScan = recent.find((entry) => !entry.undone_at);
   const currentMode = lastScan?.direction === 'out' ? 'out' : 'in';
 
   if (loadError) {
@@ -52,13 +50,11 @@ export default async function DashboardPage() {
       <main>
         <h1>Pantry scanner</h1>
         <div className="panel error">
-          <h2>Cannot read the spreadsheet</h2>
+          <h2>Cannot read the database</h2>
           <p>{loadError}</p>
           <p className="muted">
-            Check that <code>GOOGLE_SHEET_ID</code>,{' '}
-            <code>GOOGLE_SERVICE_ACCOUNT_EMAIL</code> and <code>GOOGLE_PRIVATE_KEY</code> are
-            set on the Vercel project, and that the sheet is shared with the service account
-            address as an Editor.
+            Check that the Supabase integration is connected to this Vercel project and
+            that the build ran its migrations (<code>scripts/setup-db.mjs</code>).
           </p>
         </div>
       </main>
@@ -81,6 +77,11 @@ export default async function DashboardPage() {
           <Link className="button ghost" href="/barcodes">
             Print control barcodes
           </Link>
+          <form action="/auth/signout" method="post">
+            <button type="submit" className="button ghost small" title={user.email}>
+              Sign out
+            </button>
+          </form>
         </div>
       </header>
 
@@ -103,20 +104,20 @@ export default async function DashboardPage() {
             </thead>
             <tbody>
               {pending.map((item) => (
-                <tr key={item._row}>
+                <tr key={item.id}>
                   <td>{item.name}</td>
                   <td className="num">{item.qty}</td>
                   <td className="code">{item.barcode}</td>
                   <td className="row-actions">
                     <form action={setQueueStatusAction}>
-                      <input type="hidden" name="row" value={item._row} />
+                      <input type="hidden" name="id" value={item.id} />
                       <input type="hidden" name="status" value="done" />
                       <button type="submit" className="button small">
                         Bought
                       </button>
                     </form>
                     <form action={setQueueStatusAction}>
-                      <input type="hidden" name="row" value={item._row} />
+                      <input type="hidden" name="id" value={item.id} />
                       <input type="hidden" name="status" value="cancelled" />
                       <button type="submit" className="button small ghost">
                         Drop
@@ -205,8 +206,8 @@ export default async function DashboardPage() {
             <p className="muted">No scans yet.</p>
           ) : (
             <ol className="feed">
-              {recent.map((entry, index) => (
-                <li key={`${entry.ts}-${index}`} className={entry.undone ? 'undone' : ''}>
+              {recent.map((entry) => (
+                <li key={entry.id} className={entry.undone_at ? 'undone' : ''}>
                   <span className={`pill pill-${entry.direction}`}>{entry.direction}</span>
                   <span className="feed-name">{entry.name}</span>
                   <time dateTime={entry.ts}>{formatTime(entry.ts)}</time>

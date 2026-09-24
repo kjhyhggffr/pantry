@@ -6,45 +6,16 @@
  *                 the Frisco cart, because the reason a thing leaves the
  *                 pantry is almost always that you just used the last of it
  *
- * Every change also writes a row to the `log` tab, which is what makes undo
+ * Every change also writes a row to `scan_log`, which is what makes undo
  * possible: undo reads the newest log row that has not already been undone and
  * applies its inverse.
+ *
+ * The store is passed in rather than imported so tests can use an in-memory one.
  */
 
-import { TABS, appendRow, getRecords, updateCell, updateRow } from './sheets';
-import { resolveProduct } from './openfoodfacts';
+import { resolveProduct, type Fetch } from './openfoodfacts';
 import type { Mode } from './codes';
-
-export interface PantryRecord extends Record<string, string> {
-  barcode: string;
-  name: string;
-  brand: string;
-  size: string;
-  qty: string;
-  first_seen: string;
-  last_seen: string;
-}
-
-export interface LogRecord extends Record<string, string> {
-  ts: string;
-  direction: string;
-  barcode: string;
-  name: string;
-  qty_after: string;
-  source: string;
-  undone: string;
-}
-
-export interface CartQueueRecord extends Record<string, string> {
-  ts: string;
-  barcode: string;
-  name: string;
-  qty: string;
-  status: string;
-  frisco_product_id: string;
-  frisco_product_name: string;
-  note: string;
-}
+import type { Store } from './store';
 
 export interface ScanResult {
   ok: true;
@@ -58,56 +29,44 @@ export interface ScanResult {
 }
 
 export async function recordScan(
+  store: Store,
   barcode: string,
   mode: Mode,
   source = 'scanner',
+  fetchImpl?: Fetch,
 ): Promise<ScanResult> {
-  const product = await resolveProduct(barcode);
+  const product = await resolveProduct(store, barcode, fetchImpl);
   const now = new Date().toISOString();
 
-  const pantry = await getRecords<PantryRecord>(TABS.pantry);
-  const existing = pantry.find((row) => row.barcode === barcode);
+  const existing = await store.getPantryItem(barcode);
 
   const delta = mode === 'in' ? 1 : -1;
-  const previousQty = existing ? parseQty(existing.qty) : 0;
   // Scanning something out that the pantry never knew about is normal -- you
   // are allowed to run out of a thing you never scanned in. Clamp at zero
-  // rather than going negative, which would only ever confuse the sheet.
-  const nextQty = Math.max(0, previousQty + delta);
+  // rather than going negative.
+  const nextQty = Math.max(0, (existing?.qty ?? 0) + delta);
 
-  if (existing) {
-    await updateRow(TABS.pantry, existing._row, {
-      ...existing,
-      name: product.name,
-      brand: product.brand,
-      size: product.size,
-      qty: nextQty,
-      last_seen: now,
-    });
-  } else {
-    await appendRow(TABS.pantry, {
-      barcode,
-      name: product.name,
-      brand: product.brand,
-      size: product.size,
-      qty: nextQty,
-      first_seen: now,
-      last_seen: now,
-    });
-  }
+  await store.upsertPantryItem({
+    barcode,
+    name: product.name,
+    brand: product.brand,
+    size: product.size,
+    qty: nextQty,
+    first_seen: existing?.first_seen ?? now,
+    last_seen: now,
+  });
 
-  await appendRow(TABS.log, {
+  await store.appendLog({
     ts: now,
     direction: mode,
     barcode,
     name: product.name,
     qty_after: nextQty,
     source,
-    undone: '',
   });
 
   if (mode === 'out') {
-    await queueForCart(barcode, product.name, now);
+    await queueForCart(store, barcode, product.name, now);
   }
 
   return {
@@ -127,31 +86,28 @@ export async function recordScan(
  * sitting there unfetched. Scanning three empty jars of the same passata
  * should mean "buy three", not three separate queue rows.
  */
-async function queueForCart(barcode: string, name: string, now: string): Promise<void> {
-  const queue = await getRecords<CartQueueRecord>(TABS.cartQueue);
-  const pending = queue.find(
-    (row) => row.barcode === barcode && row.status === 'pending',
-  );
+async function queueForCart(
+  store: Store,
+  barcode: string,
+  name: string,
+  now: string,
+): Promise<void> {
+  const pending = await store.getPendingCartItem(barcode);
 
   if (pending) {
-    await updateRow(TABS.cartQueue, pending._row, {
-      ...pending,
-      name,
-      qty: parseQty(pending.qty) + 1,
-      ts: now,
-    });
+    await store.updateCartItem(pending.id, { name, qty: pending.qty + 1, ts: now });
     return;
   }
 
-  await appendRow(TABS.cartQueue, {
+  await store.insertCartItem({
     ts: now,
     barcode,
     name,
     qty: 1,
     status: 'pending',
-    frisco_product_id: '',
-    frisco_product_name: '',
-    note: '',
+    frisco_product_id: null,
+    frisco_product_name: null,
+    note: null,
   });
 }
 
@@ -160,7 +116,7 @@ export interface UndoResult {
   undone: true;
   barcode: string;
   name: string;
-  direction: string;
+  direction: Mode;
   qty: number;
 }
 
@@ -171,41 +127,29 @@ export interface NothingToUndo {
 }
 
 /** Reverse the newest scan that has not already been reversed. */
-export async function undoLastScan(): Promise<UndoResult | NothingToUndo> {
-  const log = await getRecords<LogRecord>(TABS.log);
-
-  let target: (LogRecord & { _row: number }) | undefined;
-  for (let i = log.length - 1; i >= 0; i -= 1) {
-    if (!log[i].undone) {
-      target = log[i];
-      break;
-    }
-  }
+export async function undoLastScan(store: Store): Promise<UndoResult | NothingToUndo> {
+  const target = await store.lastActiveLog();
 
   if (!target) {
     return { ok: true, undone: false, reason: 'There is nothing left to undo.' };
   }
 
-  const pantry = await getRecords<PantryRecord>(TABS.pantry);
-  const row = pantry.find((entry) => entry.barcode === target!.barcode);
+  const now = new Date().toISOString();
+  const row = await store.getPantryItem(target.barcode);
 
   // The inverse of the original move: an "in" becomes a decrement.
   const delta = target.direction === 'in' ? -1 : 1;
-  const nextQty = Math.max(0, (row ? parseQty(row.qty) : 0) + delta);
+  const nextQty = Math.max(0, (row?.qty ?? 0) + delta);
 
   if (row) {
-    await updateRow(TABS.pantry, row._row, {
-      ...row,
-      qty: nextQty,
-      last_seen: new Date().toISOString(),
-    });
+    await store.upsertPantryItem({ ...row, qty: nextQty, last_seen: now });
   }
 
   if (target.direction === 'out') {
-    await unqueueFromCart(target.barcode);
+    await unqueueFromCart(store, target.barcode);
   }
 
-  await updateCell(TABS.log, target._row, 'undone', 'yes');
+  await store.markLogUndone(target.id, now);
 
   return {
     ok: true,
@@ -217,19 +161,15 @@ export async function undoLastScan(): Promise<UndoResult | NothingToUndo> {
   };
 }
 
-/** Take one unit back off the pending cart row, dropping it at zero. */
-async function unqueueFromCart(barcode: string): Promise<void> {
-  const queue = await getRecords<CartQueueRecord>(TABS.cartQueue);
-  const pending = queue.find(
-    (row) => row.barcode === barcode && row.status === 'pending',
-  );
+/** Take one unit back off the pending cart row, cancelling it at zero. */
+async function unqueueFromCart(store: Store, barcode: string): Promise<void> {
+  const pending = await store.getPendingCartItem(barcode);
   if (!pending) return;
 
-  const nextQty = parseQty(pending.qty) - 1;
+  const nextQty = pending.qty - 1;
 
   if (nextQty <= 0) {
-    await updateRow(TABS.cartQueue, pending._row, {
-      ...pending,
+    await store.updateCartItem(pending.id, {
       qty: 0,
       status: 'cancelled',
       note: 'undone at the scanner',
@@ -237,10 +177,5 @@ async function unqueueFromCart(barcode: string): Promise<void> {
     return;
   }
 
-  await updateRow(TABS.cartQueue, pending._row, { ...pending, qty: nextQty });
-}
-
-export function parseQty(value: string | number | undefined): number {
-  const parsed = Number.parseInt(String(value ?? '0'), 10);
-  return Number.isFinite(parsed) ? parsed : 0;
+  await store.updateCartItem(pending.id, { qty: nextQty });
 }

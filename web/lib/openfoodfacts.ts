@@ -2,85 +2,58 @@
  * Barcode -> product name, via Open Food Facts.
  *
  * Free, no API key, and its European grocery coverage is good, which matters
- * if you are shopping on Frisco. Every lookup is cached in the `products` tab
- * so a barcode is only ever fetched once, and anything Open Food Facts does
- * not know gets a placeholder row you can rename from the dashboard.
+ * if you are shopping on Frisco. Every lookup is cached in the `products`
+ * table so a barcode is only ever fetched once, and anything Open Food Facts
+ * does not know gets a placeholder row you can rename from the dashboard.
  */
 
-import { TABS, appendRow, getRecords, updateRow } from './sheets';
+import type { Product, Store } from './store';
 
-export interface Product {
-  barcode: string;
-  name: string;
-  brand: string;
-  size: string;
-  image_url: string;
-  source: 'off' | 'manual' | 'unknown';
-}
-
-interface ProductRecord extends Record<string, string> {
-  barcode: string;
-  name: string;
-  brand: string;
-  size: string;
-  image_url: string;
-  source: string;
-  updated: string;
-}
+export type Fetch = typeof fetch;
 
 const OFF_ENDPOINT = 'https://world.openfoodfacts.org/api/v2/product';
 const OFF_FIELDS = 'product_name,product_name_pl,brands,quantity,image_small_url';
 
 /** Open Food Facts asks every client to identify itself. */
 const USER_AGENT =
-  'pantry-scanner/1.0 (https://github.com/yourname/pantry-scanner) - personal pantry tracker';
+  'pantry-scanner/1.0 (https://github.com/kjhyhggffr/pantry) - personal pantry tracker';
+
+export const UNKNOWN_PREFIX = 'Unknown item ';
 
 /**
  * Look the barcode up in the cache, then Open Food Facts, then give up and
  * store a placeholder. Always returns something usable.
  */
-export async function resolveProduct(barcode: string): Promise<Product> {
-  const cached = await readCache(barcode);
+export async function resolveProduct(
+  store: Store,
+  barcode: string,
+  fetchImpl: Fetch = fetch,
+): Promise<Product> {
+  const cached = await store.getProduct(barcode);
   if (cached) return cached;
 
-  const fetched = await fetchFromOpenFoodFacts(barcode);
+  const fetched = await fetchFromOpenFoodFacts(barcode, fetchImpl);
 
   const product: Product = fetched ?? {
     barcode,
-    name: `Unknown item ${barcode}`,
+    name: `${UNKNOWN_PREFIX}${barcode}`,
     brand: '',
     size: '',
     image_url: '',
     source: 'unknown',
   };
 
-  await appendRow(TABS.products, {
-    ...product,
-    updated: new Date().toISOString(),
-  });
-
+  await store.upsertProduct(product);
   return product;
 }
 
-async function readCache(barcode: string): Promise<Product | null> {
-  const records = await getRecords<ProductRecord>(TABS.products);
-  const hit = records.find((record) => record.barcode === barcode);
-  if (!hit) return null;
-
-  return {
-    barcode: hit.barcode,
-    name: hit.name,
-    brand: hit.brand,
-    size: hit.size,
-    image_url: hit.image_url,
-    source: (hit.source as Product['source']) || 'off',
-  };
-}
-
-async function fetchFromOpenFoodFacts(barcode: string): Promise<Product | null> {
+async function fetchFromOpenFoodFacts(
+  barcode: string,
+  fetchImpl: Fetch,
+): Promise<Product | null> {
   try {
     const url = `${OFF_ENDPOINT}/${encodeURIComponent(barcode)}.json?fields=${OFF_FIELDS}`;
-    const response = await fetch(url, {
+    const response = await fetchImpl(url, {
       headers: { 'User-Agent': USER_AGENT },
       signal: AbortSignal.timeout(6000),
       cache: 'no-store',
@@ -110,39 +83,26 @@ async function fetchFromOpenFoodFacts(barcode: string): Promise<Product | null> 
 
 /** Rename a cached product, e.g. from the dashboard's unknown-items list. */
 export async function renameProduct(
+  store: Store,
   barcode: string,
   name: string,
   brand = '',
   size = '',
 ): Promise<void> {
-  const records = await getRecords<ProductRecord>(TABS.products);
-  const hit = records.find((record) => record.barcode === barcode);
+  const hit = await store.getProduct(barcode);
 
-  const payload = {
+  await store.upsertProduct({
     barcode,
     name,
     brand,
     size,
     image_url: hit?.image_url ?? '',
     source: 'manual',
-    updated: new Date().toISOString(),
-  };
-
-  if (hit) {
-    await updateRow(TABS.products, hit._row, payload);
-  } else {
-    await appendRow(TABS.products, payload);
-  }
+  });
 
   // Keep the pantry row's display name in step with the catalogue.
-  const pantry = await getRecords<Record<string, string>>(TABS.pantry);
-  const pantryHit = pantry.find((record) => record.barcode === barcode);
+  const pantryHit = await store.getPantryItem(barcode);
   if (pantryHit) {
-    await updateRow(TABS.pantry, pantryHit._row, {
-      ...pantryHit,
-      name,
-      brand,
-      size,
-    });
+    await store.upsertPantryItem({ ...pantryHit, name, brand, size });
   }
 }
