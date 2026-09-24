@@ -141,8 +141,9 @@ def find_product(name: str) -> dict | None:
         payload = json.loads(result.stdout)
     except json.JSONDecodeError:
         # Older builds print a table when --format json isn't supported on a
-        # subcommand. Treat that as "no usable match" rather than crashing.
-        return None
+        # subcommand. That is a broken search, not "Frisco has no such thing",
+        # so say so rather than leaving a misleading "no match" note.
+        raise RuntimeError("frisco products search did not return JSON (old frisco build?)")
 
     products = payload if isinstance(payload, list) else payload.get("products", [])
     if not products:
@@ -190,7 +191,12 @@ def run_once(url: str, token: str, dry_run: bool) -> int:
         try:
             match = find_product(item["name"])
         except Exception as exc:
+            # Unlike "no match", this says nothing about Frisco's catalogue:
+            # leave it pending so the next pass retries, and put the reason
+            # on the dashboard.
             print(f"  ! {label}: search failed -- {exc}")
+            if not dry_run:
+                report(url, token, item["id"], "pending", note=f"search failed: {exc}"[:200])
             continue
 
         if not match:

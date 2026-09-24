@@ -126,12 +126,17 @@ class FindProductTests(WorkerTestCase):
             "empty wrapper": {"products": []},
             "wrapper without products": {"other": 1},
             "no id keys": [{"name": "nameless"}],
-            "table output": "ID  NAME\n1   Milk\n",
         }
         for label, payload in cases.items():
             with self.subTest(case=label):
                 self.search_returns("Milk", payload)
                 self.assertIsNone(self.mod.find_product("Milk"))
+
+    def test_non_json_output_raises_so_it_is_not_mistaken_for_no_match(self):
+        # Older builds print a table instead of JSON; that is a broken search.
+        self.search_returns("Milk", "ID  NAME\n1   Milk\n")
+        with self.assertRaisesRegex(RuntimeError, "JSON"):
+            self.mod.find_product("Milk")
 
     def test_nonzero_exit_raises_with_stderr(self):
         self.search_returns("Milk", "", rc=1, stderr="session expired\n")
@@ -232,20 +237,47 @@ class RunOnceTests(WorkerTestCase):
             [{"id": 9, "status": "pending", "note": "no match for 'Obscure thing'"}],
         )
 
-    def test_search_cli_failure_is_skipped_without_report(self):
-        # Actual behaviour (see report): a failing *search* is only printed; the
-        # item is neither reported failed nor pending.
+    def test_search_cli_failure_reports_pending_with_note_and_continues(self):
         self.queue(self.item(10, "Milk"), self.item(11, "Bread"))
         self.search_returns("Milk", "", rc=1, stderr="boom")
         self.search_returns("Bread", [{"id": 3, "name": "Bread"}])
         self.assertEqual(self.run_once(), 1)
-        self.assertEqual([r["id"] for r in self.reports()], [11])
+        self.assertEqual(
+            self.reports(),
+            [
+                {"id": 10, "status": "pending", "note": "search failed: boom"},
+                {"id": 11, "status": "done", "friscoProductId": "3", "friscoProductName": "Bread"},
+            ],
+        )
+        self.assertEqual(self.fake.cart_adds(), [("3", "1")])
         self.assertIn("search failed -- boom", self.out.getvalue())
 
-    def test_cli_not_installed_is_treated_as_search_failure(self):
+    def test_cli_not_installed_is_reported_as_search_failure(self):
         self.queue(self.item(12, "Milk"))
         with mock.patch.object(self.mod.subprocess, "run", side_effect=FileNotFoundError("frisco")):
             self.assertEqual(self.run_once(), 0)
+        self.assertEqual(self.reports(), [{"id": 12, "status": "pending", "note": "search failed: frisco"}])
+
+    def test_non_json_search_output_is_a_search_failure_not_no_match(self):
+        self.queue(self.item(13, "Milk"))
+        self.search_returns("Milk", "ID  NAME\n1   Milk\n")
+        self.assertEqual(self.run_once(), 0)
+        [report] = self.reports()
+        self.assertEqual((report["id"], report["status"]), (13, "pending"))
+        self.assertTrue(report["note"].startswith("search failed: "), report["note"])
+        self.assertNotIn("no match", report["note"])
+        self.assertEqual(self.fake.cart_adds(), [])
+
+    def test_search_failure_note_is_truncated_to_200_chars(self):
+        self.queue(self.item(14, "Milk"))
+        self.search_returns("Milk", "", rc=1, stderr="E" * 500)
+        self.run_once()
+        self.assertEqual(len(self.reports()[0]["note"]), 200)
+
+    def test_search_failure_in_dry_run_reports_nothing(self):
+        self.queue(self.item(15, "Milk"))
+        self.search_returns("Milk", "", rc=1, stderr="boom")
+        self.assertEqual(self.run_once(dry_run=True), 0)
         self.assertEqual(self.reports(), [])
 
     def test_dry_run_adds_nothing_and_reports_nothing(self):
