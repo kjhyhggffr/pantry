@@ -53,6 +53,7 @@ class ListenerTestCase(unittest.TestCase):
         mod.HERE = self.tmp
         mod.STATE_FILE = self.tmp / ".scanner_state.json"
         mod.OUTBOX_FILE = self.tmp / ".scanner_outbox.jsonl"
+        mod.REJECTED_FILE = self.tmp / ".scanner_outbox.rejected.jsonl"
         return mod
 
     # helpers
@@ -69,6 +70,11 @@ class ListenerTestCase(unittest.TestCase):
         self.mod.OUTBOX_FILE.write_text(
             "".join(json.dumps(e) + "\n" for e in entries), encoding="utf-8"
         )
+
+    def rejected(self) -> list[str]:
+        if not self.mod.REJECTED_FILE.exists():
+            return []
+        return self.mod.REJECTED_FILE.read_text("utf-8").splitlines()
 
     def state(self) -> dict:
         return json.loads(self.mod.STATE_FILE.read_text())
@@ -191,10 +197,14 @@ class OutboxReplayTests(ListenerTestCase):
             self.assertEqual(req["headers"]["Authorization"], f"Bearer {TOKEN}")
         self.assertFalse(self.mod.OUTBOX_FILE.exists())
 
-    def test_missing_mode_in_spooled_entry_defaults_to_in(self):
-        self.write_outbox([{"code": "X"}])
+    def test_entry_without_mode_is_quarantined_not_guessed(self):
+        # spool() always writes a mode; a line without one is not ours, and
+        # guessing "in" could silently turn a CART OUT scan into a restock.
+        self.write_outbox([{"code": "X"}, {"code": "Y", "mode": "out"}])
         self.drain()
-        self.assertEqual(self.server.bodies()[0]["mode"], "in")
+        self.assertEqual([b["code"] for b in self.server.bodies()], ["Y"])
+        self.assertEqual(self.rejected(), [json.dumps({"code": "X"})])
+        self.assertFalse(self.mod.OUTBOX_FILE.exists())
 
     def test_5xx_mid_replay_stops_and_keeps_remaining_in_order(self):
         self.write_outbox(self.ENTRIES)
@@ -222,19 +232,43 @@ class OutboxReplayTests(ListenerTestCase):
         self.assertFalse(self.mod.OUTBOX_FILE.exists())
         self.assertEqual(self.server.requests, [])
 
-    def test_malformed_line_currently_wedges_the_queue(self):
-        # Documents existing behaviour (see report): a corrupt line is treated
-        # like "server down", so it and everything after it stay spooled
-        # forever even though the server is healthy.
-        self.mod.OUTBOX_FILE.write_text(
-            json.dumps({"code": "A"}) + "\n{truncated\n" + json.dumps({"code": "C"}) + "\n",
-            encoding="utf-8",
-        )
+    def test_malformed_lines_are_quarantined_and_replay_continues(self):
+        bad = [
+            "{truncated",
+            json.dumps({"mode": "in"}),  # no code
+            json.dumps({"code": "", "mode": "in"}),  # empty code
+            json.dumps({"code": "D", "mode": "sideways"}),  # unknown mode
+            json.dumps(["not", "an", "object"]),
+            "42",
+        ]
+        lines = [json.dumps({"code": "A", "mode": "in"}), *bad, json.dumps({"code": "C", "mode": "out"})]
+        self.mod.OUTBOX_FILE.write_text("".join(line + "\n" for line in lines), encoding="utf-8")
         self.drain()
-        self.assertEqual([b["code"] for b in self.server.bodies()], ["A"])
-        lines = self.mod.OUTBOX_FILE.read_text("utf-8").splitlines()
-        self.assertEqual(lines[0], "{truncated")
-        self.assertEqual(len(lines), 2)
+        self.assertEqual(
+            [(b["code"], b["mode"]) for b in self.server.bodies()], [("A", "in"), ("C", "out")]
+        )
+        self.assertFalse(self.mod.OUTBOX_FILE.exists())
+        self.assertEqual(self.rejected(), bad)
+
+    def test_quarantine_appends_across_drains(self):
+        self.mod.OUTBOX_FILE.write_text("{one\n", encoding="utf-8")
+        self.drain()
+        self.mod.OUTBOX_FILE.write_text("{two\n", encoding="utf-8")
+        self.drain()
+        self.assertEqual(self.rejected(), ["{one", "{two"])
+        self.assertEqual(self.server.requests, [])
+
+    def test_malformed_line_behind_a_down_server_stays_spooled_in_order(self):
+        # Quarantine only happens for lines the replay actually reaches.
+        self.mod.OUTBOX_FILE.write_text(
+            json.dumps({"code": "A", "mode": "in"}) + "\n{truncated\n", encoding="utf-8"
+        )
+        self.drain(url=f"http://127.0.0.1:{unused_port()}")
+        self.assertEqual(
+            self.mod.OUTBOX_FILE.read_text("utf-8").splitlines(),
+            [json.dumps({"code": "A", "mode": "in"}), "{truncated"],
+        )
+        self.assertEqual(self.rejected(), [])
 
 
 class EndToEndProcessTests(unittest.TestCase):

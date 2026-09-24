@@ -17,6 +17,7 @@ next-env.d.ts
 # Listener runtime state
 agent/.scanner_state.json
 agent/.scanner_outbox.jsonl
+agent/.scanner_outbox.rejected.jsonl
 
 # Python
 __pycache__/

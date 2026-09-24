@@ -43,6 +43,7 @@ from pathlib import Path
 HERE = Path(__file__).parent
 STATE_FILE = HERE / ".scanner_state.json"
 OUTBOX_FILE = HERE / ".scanner_outbox.jsonl"
+REJECTED_FILE = HERE / ".scanner_outbox.rejected.jsonl"
 
 # Keep in sync with web/lib/codes.ts and barcodes/generate.py
 CONTROL_CODES = {
@@ -135,6 +136,27 @@ def spool(code: str, mode: str) -> None:
         handle.write(entry + "\n")
 
 
+def parse_spooled(line: str) -> tuple[str, str] | None:
+    """(code, mode) from one outbox line, or None if the line is not usable."""
+    try:
+        entry = json.loads(line)
+    except ValueError:
+        return None
+    if not isinstance(entry, dict):
+        return None
+    code, mode = entry.get("code"), entry.get("mode")
+    if not isinstance(code, str) or not code.strip() or mode not in ("in", "out"):
+        return None
+    return code, mode
+
+
+def reject(line: str) -> None:
+    """Set aside an outbox line that can never be replayed, keeping it for a human."""
+    print(f"  ! unreadable spooled scan moved to {REJECTED_FILE.name}: {line}", file=sys.stderr)
+    with REJECTED_FILE.open("a", encoding="utf-8") as handle:
+        handle.write(line + "\n")
+
+
 def drain_outbox(url: str, token: str) -> None:
     """Replay anything that was spooled while the server was unreachable."""
     if not OUTBOX_FILE.exists():
@@ -149,9 +171,14 @@ def drain_outbox(url: str, token: str) -> None:
     remaining: list[str] = []
 
     for index, line in enumerate(lines):
+        parsed = parse_spooled(line)
+        if parsed is None:
+            # A half-written or foreign line will never parse. Quarantine it
+            # instead of mistaking it for "server down" and wedging the queue.
+            reject(line)
+            continue
         try:
-            entry = json.loads(line)
-            post_scan(url, token, entry["code"], entry.get("mode", "in"))
+            post_scan(url, token, *parsed)
         except urllib.error.HTTPError as exc:
             if exc.code < 500:
                 # A bad token or a malformed row will never succeed. Drop it
