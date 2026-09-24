@@ -135,6 +135,37 @@ class FindProductTests(WorkerTestCase):
                 self.search_returns("Milk", payload)
                 self.assertIsNone(self.mod.find_product("Milk"))
 
+    def test_zero_is_a_valid_id_and_empty_string_falls_through(self):
+        cases = {
+            "productId 0": ([{"productId": 0, "id": 9, "name": "Z"}], "0"),
+            "id 0": ([{"id": 0, "name": "Z"}], "0"),
+            "empty productId -> id": ([{"productId": "", "id": 5, "name": "Z"}], "5"),
+            "None productId -> product_id": ([{"productId": None, "product_id": 6}], "6"),
+        }
+        for label, (payload, expected) in cases.items():
+            with self.subTest(case=label):
+                self.search_returns("Milk", payload)
+                self.assertEqual(self.mod.find_product("Milk")["id"], expected)
+
+    def test_only_empty_ids_is_no_match(self):
+        self.search_returns("Milk", [{"productId": "", "id": "  ", "product_id": None}])
+        self.assertIsNone(self.mod.find_product("Milk"))
+
+    def test_unexpected_json_shapes_are_no_match_not_a_crash(self):
+        cases = {
+            "string": json.dumps("just text"),  # str payloads are raw stdout
+            "number": 42,
+            "null": None,
+            "products not a list": {"products": "nope"},
+            "products null": {"products": None},
+            "list of strings": ["Milk"],
+            "wrapper of numbers": {"products": [1, 2]},
+        }
+        for label, payload in cases.items():
+            with self.subTest(case=label):
+                self.search_returns("Milk", payload)
+                self.assertIsNone(self.mod.find_product("Milk"))
+
     def test_non_json_output_raises_so_it_is_not_mistaken_for_no_match(self):
         # Older builds print a table instead of JSON; that is a broken search.
         self.search_returns("Milk", "ID  NAME\n1   Milk\n")

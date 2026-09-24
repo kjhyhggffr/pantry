@@ -225,12 +225,24 @@ def find_product(name: str) -> dict | None:
         # so say so rather than leaving a misleading "no match" note.
         raise RuntimeError("frisco products search did not return JSON (old frisco build?)")
 
-    products = payload if isinstance(payload, list) else payload.get("products", [])
-    if not products:
+    if isinstance(payload, list):
+        products = payload
+    elif isinstance(payload, dict):
+        products = payload.get("products")
+    else:
+        products = None
+    # Anything else is a shape this script doesn't know: no usable match.
+    if not isinstance(products, list) or not products or not isinstance(products[0], dict):
         return None
 
     first = products[0]
-    product_id = first.get("productId") or first.get("id") or first.get("product_id")
+    # 0 is a perfectly good id; only a missing or blank one is not.
+    product_id = None
+    for key in ("productId", "id", "product_id"):
+        value = first.get(key)
+        if value is not None and str(value).strip():
+            product_id = value
+            break
     if product_id is None:
         return None
 
