@@ -30,7 +30,7 @@ export const CARDS = [
   {
     code: '!!MODE:IN!!',
     title: 'PANTRY IN',
-    blurb: 'Everything scanned after this goes into the pantry sheet.',
+    blurb: 'Everything scanned after this goes into the pantry database.',
     accent: '#1f7a3d',
   },
   {

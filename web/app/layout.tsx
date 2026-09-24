@@ -4,7 +4,7 @@ import './globals.css';
 
 export const metadata: Metadata = {
   title: 'Pantry scanner',
-  description: 'Barcode in, barcode out: a pantry sheet and a Frisco shopping queue.',
+  description: 'Barcode in, barcode out: a pantry database and a Frisco shopping queue.',
 };
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {

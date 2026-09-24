@@ -26,7 +26,7 @@ CARDS = [
         "code": "!!MODE:IN!!",
         "slug": "MODE_PANTRY_IN",
         "title": "PANTRY IN",
-        "blurb": "Everything scanned after this goes INTO the pantry sheet.",
+        "blurb": "Everything scanned after this goes INTO the pantry database.",
         "accent": "#1f7a3d",
     },
     {
