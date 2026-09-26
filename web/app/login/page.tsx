@@ -59,7 +59,11 @@ export default async function LoginPage({
             </button>
           </form>
         )}
-        {error && <p className="muted">That link did not work. Ask for a new one.</p>}
+        {error && (
+          <p className="muted">
+            That sign-in link has expired or was already used. Ask for a new one above.
+          </p>
+        )}
       </section>
     </main>
   );

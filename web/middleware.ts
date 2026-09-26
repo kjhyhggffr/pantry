@@ -4,6 +4,9 @@
  * out of the matcher entirely: they are guarded by SCANNER_TOKEN instead,
  * because the scanner has no browser to log in with.
  *
+ * A failed magic link (Supabase `error` params in the query) is carried over
+ * to /login as `?error=1` so the page can say so.
+ *
  * This also refreshes the Supabase session cookie on each request.
  */
 
@@ -11,6 +14,7 @@ import { NextResponse, type NextRequest } from 'next/server';
 import { createServerClient } from '@supabase/ssr';
 
 import { isAllowedEmail } from './lib/access';
+import { loginPathFor } from './lib/auth-errors';
 
 const PUBLIC_PATHS = ['/login', '/auth/'];
 
@@ -49,9 +53,7 @@ export async function middleware(request: NextRequest) {
   } = await supabase.auth.getUser();
 
   if (!isPublic && (!user || !isAllowedEmail(user.email))) {
-    const login = request.nextUrl.clone();
-    login.pathname = '/login';
-    login.search = '';
+    const login = new URL(loginPathFor(request.nextUrl.searchParams), request.url);
     return NextResponse.redirect(login);
   }
 
